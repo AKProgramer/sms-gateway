@@ -8,12 +8,16 @@ const app = express();
 app.use(express.json());
 
 // Initialize Firebase Admin SDK
-// Place your service account key JSON file in the project root
 const serviceAccount = require('./serviceAccountKey.json');
-const deviceTokens = new Map();
+
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
+
+// Initialize Firestore
+const db = admin.firestore();
+const devicesCollection = db.collection('devices');
+
 /**
  * Register device token
  * POST /register-device
@@ -34,11 +38,12 @@ app.post('/register-device', async (req, res) => {
       });
     }
 
-    // Store token (in production, save to database)
-    deviceTokens.set(userId, {
+    // Save to Firestore
+    await devicesCollection.doc(userId).set({
       token: deviceToken,
-      platform: platform,
-      registeredAt: new Date().toISOString()
+      platform: platform || 'unknown',
+      registeredAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
     console.log(`Device registered: ${userId} - ${platform}`);
@@ -77,16 +82,17 @@ app.post('/send-sms', async (req, res) => {
       });
     }
 
-    // Get device token for user
-    const deviceData = deviceTokens.get(userId);
+    // Get device token from Firestore
+    const deviceDoc = await devicesCollection.doc(userId).get();
     
-    if (!deviceData) {
+    if (!deviceDoc.exists) {
       return res.status(404).json({
         success: false,
         error: 'Device token not found for user'
       });
     }
 
+    const deviceData = deviceDoc.data();
     const deviceToken = deviceData.token;
 
     // Send FCM notification
@@ -118,6 +124,7 @@ app.post('/send-sms', async (req, res) => {
     });
   }
 });
+
 // Event Emitter for SMS triggers
 class SMSEventEmitter extends EventEmitter {}
 const smsEmitter = new SMSEventEmitter();
@@ -127,24 +134,21 @@ smsEmitter.on('sendSMS', async (data) => {
   console.log('SMS Event Triggered:', data);
   
   // TODO: Add your custom logic here
-  // This could be:
   // - Database logging
   // - Validation
   // - Rate limiting checks
   // - Analytics
-  // - etc.
 });
 
 /**
  * Send FCM notification to a specific device
  * POST /send-notification
  * Body: {
- *   deviceToken: string,
+ *   userId: string,
  *   phoneNumber: string,
  *   message: string
  * }
  */
-
 app.post('/send-notification', async (req, res) => {
   try {
     const { userId, phoneNumber, message } = req.body;
@@ -156,18 +160,18 @@ app.post('/send-notification', async (req, res) => {
       });
     }
 
-    // Get device token for user
-    const deviceData = deviceTokens.get(userId);
+    // Get device token from Firestore
+    const deviceDoc = await devicesCollection.doc(userId).get();
     
-    if (!deviceData) {
+    if (!deviceDoc.exists) {
       return res.status(404).json({
         success: false,
         error: 'Device token not found for user'
       });
     }
 
+    const deviceData = deviceDoc.data();
     const deviceToken = deviceData.token;
-
 
     // Emit event before sending
     smsEmitter.emit('sendSMS', {
@@ -187,7 +191,6 @@ app.post('/send-notification', async (req, res) => {
       },
       android: {
         priority: 'high',
-        // Optional: Add a notification for user visibility
         notification: {
           title: 'SMS Send Request',
           body: `Sending SMS to ${phoneNumber}`,
@@ -223,7 +226,7 @@ app.post('/send-notification', async (req, res) => {
  * Send FCM notification to multiple devices
  * POST /send-notification-multiple
  * Body: {
- *   deviceTokens: string[],
+ *   userIds: string[],
  *   phoneNumber: string,
  *   message: string
  * }
@@ -239,17 +242,20 @@ app.post('/send-notification-multiple', async (req, res) => {
       });
     }
 
-    const tokens = [];
+    // Batch get device tokens from Firestore
+    const devicePromises = userIds.map(userId => 
+      devicesCollection.doc(userId).get()
+    );
+    const deviceDocs = await Promise.all(devicePromises);
 
-    for (const userId of userIds) {
-      // Get device token for user
-      const deviceData = deviceTokens.get(userId); // outer deviceTokens map
-      if (deviceData && deviceData.token) {
-        tokens.push(deviceData.token); // push to array
+    const tokens = [];
+    deviceDocs.forEach((doc, idx) => {
+      if (doc.exists) {
+        tokens.push(doc.data().token);
       } else {
-        console.warn(`Device token not found for userId: ${userId}`);
+        console.warn(`Device token not found for userId: ${userIds[idx]}`);
       }
-    }
+    });
 
     if (tokens.length === 0) {
       return res.status(404).json({
@@ -363,7 +369,7 @@ app.post('/send-to-topic', async (req, res) => {
  * Subscribe device to a topic
  * POST /subscribe-to-topic
  * Body: {
- *   deviceTokens: string[],
+ *   userIds: string[],
  *   topic: string
  * }
  */
@@ -371,24 +377,27 @@ app.post('/subscribe-to-topic', async (req, res) => {
   try {
     const { userIds, topic } = req.body;
 
-    if (!userIds || !Array.isArray(userIds)) {
+    if (!userIds || !Array.isArray(userIds) || !topic) {
       return res.status(400).json({
         success: false,
         error: 'Missing required fields or userIds is not an array'
       });
     }
 
-    const tokens = [];
+    // Batch get device tokens from Firestore
+    const devicePromises = userIds.map(userId => 
+      devicesCollection.doc(userId).get()
+    );
+    const deviceDocs = await Promise.all(devicePromises);
 
-    for (const userId of userIds) {
-      // Get device token for user
-      const deviceData = deviceTokens.get(userId); // outer deviceTokens map
-      if (deviceData && deviceData.token) {
-        tokens.push(deviceData.token); // push to array
+    const tokens = [];
+    deviceDocs.forEach((doc, idx) => {
+      if (doc.exists) {
+        tokens.push(doc.data().token);
       } else {
-        console.warn(`Device token not found for userId: ${userId}`);
+        console.warn(`Device token not found for userId: ${userIds[idx]}`);
       }
-    }
+    });
 
     if (tokens.length === 0) {
       return res.status(404).json({
@@ -396,7 +405,6 @@ app.post('/subscribe-to-topic', async (req, res) => {
         error: 'No valid device tokens found for provided userIds'
       });
     }
-
 
     const response = await admin.messaging().subscribeToTopic(tokens, topic);
 
@@ -409,6 +417,40 @@ app.post('/subscribe-to-topic', async (req, res) => {
 
   } catch (error) {
     console.error('Error subscribing to topic:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Unregister device token
+ * POST /unregister-device
+ * Body: {
+ *   userId: string
+ * }
+ */
+app.post('/unregister-device', async (req, res) => {
+  try {
+    const { userId } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing userId'
+      });
+    }
+
+    await devicesCollection.doc(userId).delete();
+
+    res.status(200).json({
+      success: true,
+      message: 'Device token unregistered successfully'
+    });
+
+  } catch (error) {
+    console.error('Error unregistering device:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -440,7 +482,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`FCM Server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
-
 });
 
 // Export for testing
