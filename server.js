@@ -7,12 +7,16 @@ const EventEmitter = require('events');
 const app = express();
 app.use(express.json());
 
-// Initialize Firebase Admin SDK
-const serviceAccount = require('./serviceAccountKey.json');
+
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
+  credential: admin.credential.cert({
+    project_id: serviceAccount.project_id,
+    client_email: serviceAccount.client_email,
+    private_key: serviceAccount.private_key.replace(/\\n/g, '\n')
+  })
+});;
 
 // Initialize Firestore
 const db = admin.firestore();
