@@ -2,11 +2,51 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const EventEmitter = require('events');
-
 // Initialize Express
 const app = express();
 app.use(express.json());
 
+// Logging utility for consistent formatted logs
+const formatLog = (level, message, data = {}) => {
+  const timestamp = new Date().toISOString();
+  const logEntry = {
+    timestamp,
+    level,
+    message,
+    ...data
+  };
+  return JSON.stringify(logEntry);
+};
+
+// Request logging middleware
+app.use((req, res, next) => {
+  const startTime = Date.now();
+  const requestId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  
+  console.log(formatLog('INFO', 'Incoming Request', {
+    requestId,
+    method: req.method,
+    path: req.path,
+    ip: req.ip,
+    userId: req.body.userId || 'N/A'
+  }));
+
+  res.on('finish', () => {
+    const duration = Date.now() - startTime;
+    console.log(formatLog('INFO', 'Request Completed', {
+      requestId,
+      method: req.method,
+      path: req.path,
+      statusCode: res.statusCode,
+      duration: `${duration}ms`
+    }));
+  });
+
+  next();
+});
+if (process.env.NODE_ENV && process.env.NODE_ENV !== 'production') {
+  require('dotenv').config();
+}
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 
@@ -51,7 +91,11 @@ app.post('/register-device', async (req, res) => {
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    console.log(`Device registered: ${userId} - ${platform}`);
+    console.log(formatLog('INFO', 'Device Registered Successfully', {
+      userId,
+      platform,
+      timestamp: new Date().toISOString()
+    }));
 
     res.status(200).json({
       success: true,
@@ -59,7 +103,11 @@ app.post('/register-device', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error registering device:', error);
+    console.error(formatLog('ERROR', 'Device Registration Failed', {
+      userId: req.body.userId,
+      error: error.message,
+      stack: error.stack
+    }));
     res.status(500).json({
       success: false,
       error: error.message
@@ -115,6 +163,13 @@ app.post('/send-sms', async (req, res) => {
 
     const response = await admin.messaging().send(fcmMessage);
 
+    console.log(formatLog('INFO', 'SMS Sent Successfully', {
+      userId,
+      phoneNumber: phoneNumber.slice(-4),
+      messageId: response,
+      messageLength: message.length
+    }));
+
     res.status(200).json({
       success: true,
       messageId: response,
@@ -122,7 +177,12 @@ app.post('/send-sms', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error sending SMS:', error);
+    console.error(formatLog('ERROR', 'SMS Send Failed', {
+      userId: req.body.userId,
+      phoneNumber: req.body.phoneNumber,
+      error: error.message,
+      stack: error.stack
+    }));
     res.status(500).json({
       success: false,
       error: error.message
@@ -207,7 +267,12 @@ app.post('/send-notification', async (req, res) => {
     // Send message via FCM
     const response = await admin.messaging().send(fcmMessage);
 
-    console.log('Successfully sent message:', response);
+    console.log(formatLog('INFO', 'Notification Sent Successfully', {
+      userId,
+      phoneNumber: phoneNumber.slice(-4),
+      messageId: response,
+      hasNotification: true
+    }));
 
     res.status(200).json({
       success: true,
@@ -219,7 +284,12 @@ app.post('/send-notification', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error sending message:', error);
+    console.error(formatLog('ERROR', 'Notification Send Failed', {
+      userId: req.body.userId,
+      phoneNumber: req.body.phoneNumber,
+      error: error.message,
+      stack: error.stack
+    }));
     res.status(500).json({
       success: false,
       error: error.message
@@ -292,7 +362,13 @@ app.post('/send-notification-multiple', async (req, res) => {
 
     const response = await admin.messaging().sendEachForMulticast(multicastMessage);
 
-    console.log('Multicast response:', response);
+    console.log(formatLog('INFO', 'Multicast Message Sent', {
+      userCount: userIds.length,
+      tokenCount: tokens.length,
+      successCount: response.successCount,
+      failureCount: response.failureCount,
+      phoneNumber: phoneNumber.slice(-4)
+    }));
 
     res.status(200).json({
       success: true,
@@ -307,7 +383,11 @@ app.post('/send-notification-multiple', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error sending multicast message:', error);
+    console.error(formatLog('ERROR', 'Multicast Send Failed', {
+      userIds: req.body.userIds,
+      error: error.message,
+      stack: error.stack
+    }));
     res.status(500).json({
       success: false,
       error: error.message
@@ -356,13 +436,23 @@ app.post('/send-to-topic', async (req, res) => {
 
     const response = await admin.messaging().send(topicMessage);
 
+    console.log(formatLog('INFO', 'Topic Message Sent', {
+      topic,
+      messageId: response,
+      phoneNumber: phoneNumber.slice(-4)
+    }));
+
     res.status(200).json({
       success: true,
       messageId: response
     });
 
   } catch (error) {
-    console.error('Error sending to topic:', error);
+    console.error(formatLog('ERROR', 'Topic Message Send Failed', {
+      topic: req.body.topic,
+      error: error.message,
+      stack: error.stack
+    }));
     res.status(500).json({
       success: false,
       error: error.message
@@ -413,6 +503,14 @@ app.post('/subscribe-to-topic', async (req, res) => {
 
     const response = await admin.messaging().subscribeToTopic(tokens, topic);
 
+    console.log(formatLog('INFO', 'Topic Subscription Successful', {
+      topic,
+      userCount: userIds.length,
+      tokenCount: tokens.length,
+      successCount: response.successCount,
+      failureCount: response.failureCount
+    }));
+
     res.status(200).json({
       success: true,
       successCount: response.successCount,
@@ -421,7 +519,12 @@ app.post('/subscribe-to-topic', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error subscribing to topic:', error);
+    console.error(formatLog('ERROR', 'Topic Subscription Failed', {
+      topic: req.body.topic,
+      userIds: req.body.userIds,
+      error: error.message,
+      stack: error.stack
+    }));
     res.status(500).json({
       success: false,
       error: error.message
@@ -449,13 +552,22 @@ app.post('/unregister-device', async (req, res) => {
 
     await devicesCollection.doc(userId).delete();
 
+    console.log(formatLog('INFO', 'Device Unregistered Successfully', {
+      userId,
+      timestamp: new Date().toISOString()
+    }));
+
     res.status(200).json({
       success: true,
       message: 'Device token unregistered successfully'
     });
 
   } catch (error) {
-    console.error('Error unregistering device:', error);
+    console.error(formatLog('ERROR', 'Device Unregistration Failed', {
+      userId: req.body.userId,
+      error: error.message,
+      stack: error.stack
+    }));
     res.status(500).json({
       success: false,
       error: error.message
@@ -506,7 +618,13 @@ app.post('/register-webhook', async (req, res) => {
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    console.log(`Webhook registered: ${webhookId} for user ${userId}`);
+    console.log(formatLog('INFO', 'Webhook Registered Successfully', {
+      webhookId,
+      userId,
+      webhookUrl: webhookUrl.substring(0, 50) + '...',
+      events,
+      timestamp: new Date().toISOString()
+    }));
 
     res.status(200).json({
       success: true,
@@ -515,7 +633,12 @@ app.post('/register-webhook', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error registering webhook:', error);
+    console.error(formatLog('ERROR', 'Webhook Registration Failed', {
+      userId: req.body.userId,
+      webhookUrl: req.body.webhookUrl,
+      error: error.message,
+      stack: error.stack
+    }));
     res.status(500).json({
       success: false,
       error: error.message
@@ -551,7 +674,11 @@ app.post('/unregister-webhook', async (req, res) => {
 
     await webhooksCollection.doc(webhookId).delete();
 
-    console.log(`Webhook unregistered: ${webhookId}`);
+    console.log(formatLog('INFO', 'Webhook Unregistered Successfully', {
+      webhookId,
+      userId: webhookDoc.data().userId,
+      timestamp: new Date().toISOString()
+    }));
 
     res.status(200).json({
       success: true,
@@ -559,7 +686,11 @@ app.post('/unregister-webhook', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error unregistering webhook:', error);
+    console.error(formatLog('ERROR', 'Webhook Unregistration Failed', {
+      webhookId: req.body.webhookId,
+      error: error.message,
+      stack: error.stack
+    }));
     res.status(500).json({
       success: false,
       error: error.message
@@ -599,8 +730,18 @@ app.get('/webhooks/:userId', async (req, res) => {
       webhooks: webhooks
     });
 
+    console.log(formatLog('INFO', 'Webhooks Retrieved Successfully', {
+      userId,
+      webhookCount: webhooks.length,
+      timestamp: new Date().toISOString()
+    }));
+
   } catch (error) {
-    console.error('Error fetching webhooks:', error);
+    console.error(formatLog('ERROR', 'Webhook Fetch Failed', {
+      userId: req.params.userId,
+      error: error.message,
+      stack: error.stack
+    }));
     res.status(500).json({
       success: false,
       error: error.message
@@ -623,9 +764,20 @@ async function sendWebhookLogs(userId, logData, eventType) {
     const snapshot = await query.get();
 
     if (snapshot.empty) {
-      console.log(`No webhooks found for user ${userId}`);
+      console.log(formatLog('WARN', 'No Webhooks Found for User', {
+        userId,
+        eventType,
+        timestamp: new Date().toISOString()
+      }));
       return;
     }
+
+    console.log(formatLog('INFO', 'Processing Webhook Delivery', {
+      userId,
+      eventType,
+      webhookCount: snapshot.size,
+      logId: logData.id
+    }));
 
     const webhookRequests = [];
 
