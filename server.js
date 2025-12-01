@@ -2,6 +2,7 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const EventEmitter = require('events');
+require('dotenv').config();
 // Initialize Express
 const app = express();
 app.use(express.json());
@@ -44,9 +45,6 @@ app.use((req, res, next) => {
 
   next();
 });
-if (process.env.NODE_ENV && process.env.NODE_ENV !== 'production') {
-  require('dotenv').config();
-}
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 
@@ -804,14 +802,31 @@ async function sendWebhookLogs(userId, logData, eventType) {
         })
           .then(response => {
             if (!response.ok) {
-              console.warn(`Webhook ${doc.id} responded with status ${response.status}`);
+              console.warn(formatLog('WARN', 'Webhook Delivery Failed', {
+                webhookId: doc.id,
+                url: webhook.webhookUrl.substring(0, 50) + '...',
+                statusCode: response.status,
+                eventType,
+                logId: logData.id
+              }));
             } else {
-              console.log(`Webhook ${doc.id} delivered successfully`);
+              console.log(formatLog('INFO', 'Webhook Delivered Successfully', {
+                webhookId: doc.id,
+                url: webhook.webhookUrl.substring(0, 50) + '...',
+                statusCode: response.status,
+                eventType,
+                logId: logData.id
+              }));
             }
           })
           .catch(error => {
-            console.error(`Error sending webhook ${doc.id}:`, error.message);
-            // Optionally: Mark webhook as failed or inactive after multiple failures
+            console.error(formatLog('ERROR', 'Webhook Delivery Error', {
+              webhookId: doc.id,
+              url: webhook.webhookUrl.substring(0, 50) + '...',
+              error: error.message,
+              eventType,
+              logId: logData.id
+            }));
           });
 
         webhookRequests.push(request);
@@ -881,6 +896,117 @@ app.post('/send-webhook-logs', async (req, res) => {
 
   } catch (error) {
     console.error('Error sending webhook logs:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Get SMS logs for a user
+ * GET /users/:userId/logs
+ * Optional query params:
+ *   - logId: Get specific log by ID
+ *   - limit: Number of logs to return (default: 100)
+ */
+app.get('/users/:userId/logs', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { logId, limit } = req.query;
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing userId'
+      });
+    }
+
+    const logsCollection = db.collection('users').doc(userId).collection('logs');
+
+    // If logId is provided, fetch specific log
+    if (logId) {
+      const logDoc = await logsCollection.doc(logId).get();
+
+      if (!logDoc.exists) {
+        console.log(formatLog('WARN', 'Log Not Found', {
+          userId,
+          logId,
+          timestamp: new Date().toISOString()
+        }));
+
+        return res.status(404).json({
+          success: false,
+          error: 'Log not found'
+        });
+      }
+
+      const logData = logDoc.data();
+
+      console.log(formatLog('INFO', 'Log Retrieved Successfully', {
+        userId,
+        logId,
+        timestamp: new Date().toISOString()
+      }));
+
+      return res.status(200).json({
+        success: true,
+        log: {
+          id: logDoc.id,
+          recipient: logData.recipient,
+          message: logData.message,
+          status: logData.status,
+          timestamp: logData.timestamp.toDate ? logData.timestamp.toDate().toISOString() : logData.timestamp,
+          type: logData.type
+        }
+      });
+    }
+
+    // Fetch all logs for user, ordered by timestamp descending
+    let query = logsCollection.orderBy('timestamp', 'desc');
+
+    if (limit) {
+      const limitNum = parseInt(limit);
+      if (!isNaN(limitNum) && limitNum > 0) {
+        query = query.limit(limitNum);
+      }
+    } else {
+      query = query.limit(100); // Default limit
+    }
+
+    const snapshot = await query.get();
+
+    const logs = snapshot.docs.map(doc => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        recipient: data.recipient,
+        message: data.message,
+        status: data.status,
+        timestamp: data.timestamp.toDate ? data.timestamp.toDate().toISOString() : data.timestamp,
+        type: data.type
+      };
+    });
+
+    console.log(formatLog('INFO', 'Logs Retrieved Successfully', {
+      userId,
+      logCount: logs.length,
+      timestamp: new Date().toISOString()
+    }));
+
+    res.status(200).json({
+      success: true,
+      count: logs.length,
+      logs: logs
+    });
+
+  } catch (error) {
+    console.error(formatLog('ERROR', 'Log Fetch Failed', {
+      userId: req.params.userId,
+      logId: req.query.logId,
+      error: error.message,
+      stack: error.stack
+    }));
     res.status(500).json({
       success: false,
       error: error.message
