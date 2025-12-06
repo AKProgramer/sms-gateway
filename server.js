@@ -262,10 +262,6 @@ app.post('/send-sms', async (req, res) => {
       status: status
     };
 
-    // Include log details if found
-    if (logData) {
-      responseData.log = logData;
-    }
 
     console.log(formatLog('INFO', 'SMS Request Completed', {
       userId,
