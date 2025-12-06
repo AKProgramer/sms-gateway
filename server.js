@@ -114,17 +114,83 @@ app.post('/register-device', async (req, res) => {
 });
 
 /**
+ * Helper function to poll Firebase for log creation
+ * @param {string} userId - User ID
+ * @param {string} serverId - Server ID to search for
+ * @param {number} maxAttempts - Maximum polling attempts (default: 10)
+ * @param {number} intervalMs - Interval between polls in ms (default: 1000)
+ * @returns {Promise<object|null>} - Log data if found, null otherwise
+ */
+async function pollForLog(userId, serverId, maxAttempts = 10, intervalMs = 1000) {
+  const logsCollection = db.collection('users').doc(userId).collection('logs');
+  
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const logQuery = await logsCollection.where('serverId', '==', serverId).limit(1).get();
+      
+      if (!logQuery.empty) {
+        const logDoc = logQuery.docs[0];
+        const logData = logDoc.data();
+        
+        console.log(formatLog('INFO', 'Log Found After Polling', {
+          userId,
+          serverId,
+          logId: logDoc.id,
+          status: logData.status,
+          attempt: attempt,
+          totalTime: `${attempt * intervalMs}ms`
+        }));
+        
+        return {
+          id: logDoc.id,
+          recipient: logData.recipient,
+          message: logData.message,
+          status: logData.status,
+          timestamp: logData.timestamp.toDate ? logData.timestamp.toDate().toISOString() : logData.timestamp,
+          type: logData.type,
+          serverId: logData.serverId
+        };
+      }
+      
+      // Wait before next attempt (except on last attempt)
+      if (attempt < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, intervalMs));
+      }
+    } catch (error) {
+      console.error(formatLog('ERROR', 'Error During Log Polling', {
+        userId,
+        serverId,
+        attempt: attempt,
+        error: error.message
+      }));
+    }
+  }
+  
+  console.log(formatLog('WARN', 'Log Not Found After Polling', {
+    userId,
+    serverId,
+    attempts: maxAttempts,
+    totalTime: `${maxAttempts * intervalMs}ms`
+  }));
+  
+  return null;
+}
+
+/**
  * Send SMS by userId (lookup token automatically)
  * POST /send-sms
  * Body: {
  *   userId: string,
  *   phoneNumber: string,
- *   message: string
+ *   message: string,
+ *   waitForLog: boolean (optional, default: true) - Wait for log creation
+ *   maxWaitTime: number (optional, default: 10) - Max seconds to wait for log
+ *   delaySeconds: number (optional, default: 5) - Delay between SMS sends on device
  * }
  */
 app.post('/send-sms', async (req, res) => {
   try {
-    const { userId, phoneNumber, message } = req.body;
+    const { userId, phoneNumber, message, waitForLog = true, maxWaitTime = 10, delaySeconds = 5 } = req.body;
 
     if (!userId || !phoneNumber || !message) {
       return res.status(400).json({
@@ -146,33 +212,70 @@ app.post('/send-sms', async (req, res) => {
     const deviceData = deviceDoc.data();
     const deviceToken = deviceData.token;
 
-    // Send FCM notification
+    // Generate unique serverId
+    const serverId = `${userId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    // Send FCM notification with serverId and delay
     const fcmMessage = {
       token: deviceToken,
       data: {
         phone_number: phoneNumber,
         message: message,
-        timestamp: Date.now().toString()
+        timestamp: Date.now().toString(),
+        server_id: serverId,
+        delay_seconds: delaySeconds.toString()
       },
       android: {
         priority: 'high'
       }
     };
 
-    const response = await admin.messaging().send(fcmMessage);
+    const fcmResponse = await admin.messaging().send(fcmMessage);
 
-    console.log(formatLog('INFO', 'SMS Sent Successfully', {
+    console.log(formatLog('INFO', 'FCM Message Sent', {
       userId,
       phoneNumber: phoneNumber.slice(-4),
-      messageId: response,
-      messageLength: message.length
+      messageId: fcmResponse,
+      messageLength: message.length,
+      serverId,
+      delaySeconds
     }));
 
-    res.status(200).json({
+    // If waitForLog is true, poll for log creation
+    let logData = null;
+    let status = 'pending';
+    
+    if (waitForLog) {
+      const maxAttempts = Math.max(1, Math.min(maxWaitTime, 30)); // Cap at 30 seconds
+      logData = await pollForLog(userId, serverId, maxAttempts, 1000);
+      
+      if (logData) {
+        status = logData.status;
+      }
+    }
+
+    const responseData = {
       success: true,
-      messageId: response,
-      userId: userId
-    });
+      messageId: fcmResponse,
+      userId: userId,
+      serverId: serverId,
+      status: status
+    };
+
+    // Include log details if found
+    if (logData) {
+      responseData.log = logData;
+    }
+
+    console.log(formatLog('INFO', 'SMS Request Completed', {
+      userId,
+      serverId,
+      status,
+      logFound: !!logData,
+      phoneNumber: phoneNumber.slice(-4)
+    }));
+
+    res.status(200).json(responseData);
 
   } catch (error) {
     console.error(formatLog('ERROR', 'SMS Send Failed', {
