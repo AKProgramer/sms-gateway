@@ -1007,6 +1007,131 @@ app.post('/send-webhook-logs', async (req, res) => {
 });
 
 /**
+ * Get SMS log by ID or serverId
+ * GET /get-sms
+ * Query params:
+ *   - userId: string (required)
+ *   - logId: string (optional) - Get log by document ID
+ *   - serverId: string (optional) - Get log by serverId
+ * Note: Must provide either logId or serverId
+ */
+app.get('/get-sms', async (req, res) => {
+  try {
+    const { userId, logId, serverId } = req.query;
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing userId parameter'
+      });
+    }
+
+    if (!logId && !serverId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Must provide either logId or serverId parameter'
+      });
+    }
+
+    const logsCollection = db.collection('users').doc(userId).collection('logs');
+
+    // Search by document ID
+    if (logId) {
+      const logDoc = await logsCollection.doc(logId).get();
+
+      if (!logDoc.exists) {
+        console.log(formatLog('WARN', 'Log Not Found by ID', {
+          userId,
+          logId,
+          timestamp: new Date().toISOString()
+        }));
+
+        return res.status(404).json({
+          success: false,
+          error: 'Log not found with provided logId'
+        });
+      }
+
+      const logData = logDoc.data();
+
+      console.log(formatLog('INFO', 'Log Retrieved by ID', {
+        userId,
+        logId,
+        serverId: logData.serverId,
+        timestamp: new Date().toISOString()
+      }));
+
+      return res.status(200).json({
+        success: true,
+        log: {
+          id: logDoc.id,
+          recipient: logData.recipient,
+          message: logData.message,
+          status: logData.status,
+          timestamp: logData.timestamp.toDate ? logData.timestamp.toDate().toISOString() : logData.timestamp,
+          type: logData.type,
+          serverId: logData.serverId
+        }
+      });
+    }
+
+    // Search by serverId
+    if (serverId) {
+      const logQuery = await logsCollection.where('serverId', '==', serverId).limit(1).get();
+
+      if (logQuery.empty) {
+        console.log(formatLog('WARN', 'Log Not Found by serverId', {
+          userId,
+          serverId,
+          timestamp: new Date().toISOString()
+        }));
+
+        return res.status(404).json({
+          success: false,
+          error: 'Log not found with provided serverId'
+        });
+      }
+
+      const logDoc = logQuery.docs[0];
+      const logData = logDoc.data();
+
+      console.log(formatLog('INFO', 'Log Retrieved by serverId', {
+        userId,
+        serverId,
+        logId: logDoc.id,
+        timestamp: new Date().toISOString()
+      }));
+
+      return res.status(200).json({
+        success: true,
+        log: {
+          id: logDoc.id,
+          recipient: logData.recipient,
+          message: logData.message,
+          status: logData.status,
+          timestamp: logData.timestamp.toDate ? logData.timestamp.toDate().toISOString() : logData.timestamp,
+          type: logData.type,
+          serverId: logData.serverId
+        }
+      });
+    }
+
+  } catch (error) {
+    console.error(formatLog('ERROR', 'Get SMS Failed', {
+      userId: req.query.userId,
+      logId: req.query.logId,
+      serverId: req.query.serverId,
+      error: error.message,
+      stack: error.stack
+    }));
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
  * Get SMS logs for a user
  * GET /users/:userId/logs
  * Optional query params:
